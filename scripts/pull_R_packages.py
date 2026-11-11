@@ -1,30 +1,93 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
+"""Generate Packages.txt from the CRAN Machine Learning task view."""
 
-"""
-    This script will scrape the r-project.org machine learning selection and
-    format the packages in github markdown style for this
-    awesome-machine-learning repo.
-"""
+import argparse
+from html.parser import HTMLParser
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+from urllib.request import urlopen
 
-from pyquery import PyQuery as pq
-import urllib
-import codecs
-import random
+VIEW_URL = 'https://cran.r-project.org/web/views/MachineLearning.html'
 
-text_file = codecs.open("Packages.txt", encoding='utf-8', mode="w")
-d = pq(url='http://cran.r-project.org/web/views/MachineLearning.html',
-       opener=lambda url, **kw: urllib.urlopen(url).read())
 
-for e in d("li").items():
-    package_name = e("a").html()
-    package_link = e("a")[0].attrib['href']
-    if '..' in package_link:
-        package_link = package_link.replace("..",
-                                            'http://cran.r-project.org/web')
-        dd = pq(url=package_link, opener=lambda url,
-                **kw: urllib.urlopen(url).read())
-        package_description = dd("h2").html()
-        text_file.write(" [%s](%s) - %s \n" % (package_name, package_link,
-                                               package_description))
-        # print("* [%s](%s) - %s" % (package_name,package_link,
-        #                            package_description))
+class Links(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self.href = None
+        self.label = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            self.href = dict(attrs).get('href')
+            self.label = []
+
+    def handle_data(self, data):
+        if self.href is not None:
+            self.label.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == 'a' and self.href is not None:
+            self.links.append((self.href, ''.join(self.label).strip()))
+            self.href = None
+
+
+class Heading(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.active = False
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'h2':
+            self.active = True
+
+    def handle_endtag(self, tag):
+        if tag == 'h2':
+            self.active = False
+
+    def handle_data(self, data):
+        if self.active:
+            self.parts.append(data)
+
+
+def fetch(url):
+    with urlopen(url, timeout=30) as response:
+        return response.read().decode('utf-8')
+
+
+def generate(fetch_page=fetch):
+    links = Links()
+    links.feed(fetch_page(VIEW_URL))
+    rows = []
+    seen = set()
+    for href, name in links.links:
+        url = urljoin(VIEW_URL, href)
+        parsed = urlparse(url)
+        if (parsed.scheme != 'https' or parsed.netloc != 'cran.r-project.org'
+                or not parsed.path.startswith('/web/packages/')
+                or not parsed.path.endswith('/index.html') or not name or url in seen):
+            continue
+        seen.add(url)
+        heading = Heading()
+        heading.feed(fetch_page(url))
+        description = ' '.join(''.join(heading.parts).split())
+        if not description:
+            raise ValueError(f'Missing package heading: {url}')
+        rows.append(f' [{name}]({url}) - {description} \n')
+    if not rows:
+        raise ValueError('No package links found in CRAN task view')
+    return ''.join(rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, default=Path('Packages.txt'))
+    args = parser.parse_args()
+    # Complete all network operations before touching an existing output file.
+    result = generate()
+    args.output.write_text(result, encoding='utf-8')
+
+
+if __name__ == '__main__':
+    main()
